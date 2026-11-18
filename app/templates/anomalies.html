@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block title %}异常核查 - 园区总表用量发布平台{% endblock %}
+{% block flashes %}
+  {% if ok %}<div class="flash-ok">{{ ok }}</div>{% endif %}
+  {% if error %}<div class="flash-err">{{ error }}</div>{% endif %}
+{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>每小时最大 kWh（额定功率）阈值</h2>
+  <p class="muted">
+    用相邻且同周期的两条已提交读数计算平均功率：
+    <code>(后笔累计 − 前笔累计) / UTC 时差(小时)</code>。
+    平均功率<strong>严格大于</strong>该阈值即视为超限，形成待复测记录；
+    换表跨周期、时差为零或读数倒退的区间不参与计算。
+  </p>
+  <p>
+    {% if overview.threshold %}
+    现行阈值：<strong>{{ '%g'|format(overview.threshold.max_kwh_per_hour) }} kWh/h</strong>
+    <span class="muted">（阈值版本 #{{ overview.threshold.id }}，
+      设置于 {{ overview.threshold.created_at }}）</span>
+    {% else %}
+    <span class="pill bad">尚未设置阈值</span>
+    <span class="muted">请设置后才会生成待复测记录。</span>
+    {% endif %}
+  </p>
+  <form action="/anomalies/threshold" method="post">
+    <label>每小时最大 kWh
+      <input type="number" name="max_kwh_per_hour" step="any" min="0"
+             value="{{ threshold_input }}"
+             placeholder="例如 3.5" required>
+    </label>
+    <button class="btn" type="submit">保存阈值并重算</button>
+  </form>
+  <p class="muted">
+    阈值变更会形成新的阈值版本并重新生成记录；旧记录（含已核实结论）保留可查，
+    但不会套用到新阈值下形成的区间。重复保存同一数值不新建版本。
+  </p>
+</div>
+
+<div class="card">
+  <h2>当前状态核对</h2>
+  <p class="muted">
+    当前已提交读数 {{ overview.reading_count }} 条
+    {% if overview.threshold %}
+    ；按现行阈值共有 {{ overview.current_over_limit }} 个相邻同周期区间超限。
+    {% else %}
+    ；设置阈值后才能判断超限区间。
+    {% endif %}
+  </p>
+  {% if overview.missing_records %}
+  <div class="flash-err">有 {{ overview.missing_records }} 个按现行阈值超限的区间
+    尚未形成记录（例如阈值刚设置但记录写入未完成），请重新保存阈值以补建。</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>待复测记录（{{ overview.pending|length }}）</h2>
+  <p class="muted">这些区间由<strong>当前已提交读数</strong>构成，且按<strong>现行阈值</strong>超限，尚未核实。</p>
+  {% if overview.pending %}
+  <table>
+    <tr><th>#</th><th>区间（UTC）</th><th>周期号</th><th>起累计</th><th>止累计</th>
+        <th>时差(h)</th><th>用量 kWh</th><th>平均功率 kWh/h</th>
+        <th>阈值快照</th><th>形成时间</th><th>核实</th></tr>
+    {% for r in overview.pending %}
+    <tr>
+      <td>#{{ r.id }}</td>
+      <td>{{ r.start_ts }} → {{ r.end_ts }}</td>
+      <td>{{ r.start_period_no }}</td>
+      <td>{{ r.start_cumulative }}</td><td>{{ r.end_cumulative }}</td>
+      <td>{{ '%.4f'|format(r.elapsed_hours) }}</td>
+      <td>{{ r.usage_kwh }}</td>
+      <td><strong>{{ '%.4f'|format(r.avg_kwh_per_hour) }}</strong></td>
+      <td>{{ '%g'|format(r.threshold_kwh_per_hour) }}</td>
+      <td class="muted">{{ r.created_at }}</td>
+      <td>
+        <form action="/anomalies/{{ r.id }}/verify" method="post">
+          <input type="text" name="note" placeholder="核实备注（可选）"
+                 maxlength="500" style="width:130px">
+          <button class="btn" type="submit">标记已核实</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">没有待复测记录。</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>现行阈值下已核实（{{ overview.verified_current|length }}）</h2>
+  <p class="muted">结论仍然对应当前读数与现行阈值；补传或阈值变更后会自动转入下方历史记录。</p>
+  <table>
+    <tr><th>#</th><th>区间（UTC）</th><th>平均功率 kWh/h</th><th>阈值快照</th>
+        <th>核实时间</th><th>备注</th></tr>
+    {% for r in overview.verified_current %}
+    <tr>
+      <td>#{{ r.id }}</td>
+      <td>{{ r.start_ts }} → {{ r.end_ts }}</td>
+      <td>{{ '%.4f'|format(r.avg_kwh_per_hour) }}</td>
+      <td>{{ '%g'|format(r.threshold_kwh_per_hour) }}</td>
+      <td class="muted">{{ r.verified_at }}</td>
+      <td>{{ r.verified_note }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="muted">暂无已核实记录。</td></tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="card">
+  <h2>历史留档（{{ overview.historical|length }}）</h2>
+  <p class="muted">
+    这些记录因阈值变更或读数补传而已过期，<strong>不再计入当前待办</strong>；
+    两端读数、当时阈值与核实结论均原样保留，仅供追溯。
+  </p>
+  <table>
+    <tr><th>#</th><th>区间（UTC）</th><th>时差(h)</th><th>平均功率</th>
+        <th>阈值快照</th><th>状态</th><th>核实时间</th><th>过期原因</th></tr>
+    {% for r in overview.historical %}
+    <tr>
+      <td>#{{ r.id }}</td>
+      <td>{{ r.start_ts }} → {{ r.end_ts }}</td>
+      <td>{{ '%.4f'|format(r.elapsed_hours) }}</td>
+      <td>{{ '%.4f'|format(r.avg_kwh_per_hour) }}</td>
+      <td>{{ '%g'|format(r.threshold_kwh_per_hour) }}</td>
+      <td>{% if r.status == 'verified' %}<span class="pill ok">已核实（历史）</span>
+          {% else %}<span class="pill bad">待复测（历史）</span>{% endif %}</td>
+      <td class="muted">{{ r.verified_at or '—' }}</td>
+      <td class="muted">{{ r.stale_reason }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="8" class="muted">暂无历史留档。</td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}

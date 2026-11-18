@@ -18,6 +18,8 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from .anomalies import sync_anomalies
+
 
 class UploadError(Exception):
     """上传业务错误（触发整批拒收）。"""
@@ -177,7 +179,6 @@ def upload_readings(conn: sqlite3.Connection, filename: str,
             (r["ts"], r["period_no"]): r["cumulative"]
             for r in conn.execute("SELECT ts, period_no, cumulative FROM readings")
         }
-
         to_insert: list[ReadingRow] = []
         skipped = 0
         for row in rows:
@@ -215,6 +216,10 @@ def upload_readings(conn: sqlite3.Connection, filename: str,
                 " VALUES (?, ?, ?, ?)",
                 (row.ts, row.period_no, row.cumulative, batch_id),
             )
+
+        # 补传可能形成新的相邻区间或拆开旧区间：在同一事务内按现行阈值
+        # 补齐待复测记录（只新增，不改动已有记录及其核实结论）。
+        sync_anomalies(conn)
 
         inserted = len(to_insert)
         conn.execute(

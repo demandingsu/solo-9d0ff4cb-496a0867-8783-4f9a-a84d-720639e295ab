@@ -83,8 +83,41 @@ CREATE TABLE IF NOT EXISTS version_monthly_totals (
     UNIQUE(version_id, usage_month)
 );
 
+-- 每小时最大 kWh 阈值的历次设置（只追加，不修改）
+CREATE TABLE IF NOT EXISTS power_threshold_versions (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    max_kwh_per_hour REAL    NOT NULL CHECK (max_kwh_per_hour > 0),
+    created_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- 超功率区间的待复测记录（不可变快照；核实只追加状态与时间）
+CREATE TABLE IF NOT EXISTS power_anomalies (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    threshold_version_id   INTEGER NOT NULL REFERENCES power_threshold_versions(id),
+    threshold_kwh_per_hour REAL    NOT NULL,   -- 形成记录时的阈值快照
+    start_reading_id       INTEGER NOT NULL,   -- 两端读数 id（读数本身不删除）
+    end_reading_id         INTEGER NOT NULL,
+    start_ts               TEXT    NOT NULL,   -- 两端读数快照
+    start_period_no        INTEGER NOT NULL,
+    start_cumulative       REAL    NOT NULL,
+    end_ts                 TEXT    NOT NULL,
+    end_period_no          INTEGER NOT NULL,
+    end_cumulative         REAL    NOT NULL,
+    elapsed_hours          REAL    NOT NULL,
+    usage_kwh              REAL    NOT NULL,
+    avg_kwh_per_hour       REAL    NOT NULL,
+    status                 TEXT    NOT NULL DEFAULT 'pending'
+                           CHECK (status IN ('pending', 'verified')),
+    verified_at            TEXT,
+    verified_note          TEXT    NOT NULL DEFAULT '',
+    created_at             TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE(threshold_version_id, start_reading_id, end_reading_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_readings_ts ON readings(ts);
 CREATE INDEX IF NOT EXISTS idx_details_version ON version_details(version_id);
+CREATE INDEX IF NOT EXISTS idx_anomalies_threshold
+    ON power_anomalies(threshold_version_id, status);
 """
 
 

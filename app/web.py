@@ -11,6 +11,13 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from . import config
+from .anomalies import (
+    StaleAnomalyError,
+    ThresholdError,
+    build_overview,
+    set_threshold,
+    verify_anomaly,
+)
 from .database import close_conn, get_conn, init_db
 from .services import (
     PublishError,
@@ -41,6 +48,8 @@ def _dashboard_data(conn):
         "versions": conn.execute("SELECT COUNT(*) c FROM published_versions").fetchone()["c"],
         "rejected": conn.execute(
             "SELECT COUNT(*) c FROM upload_batches WHERE status='rejected'").fetchone()["c"],
+        # 当前待办必须对应已提交读数与现行阈值，不能只数 status=pending
+        "anomalies_pending": len(build_overview(conn)["pending"]),
     }
     latest = conn.execute(
         "SELECT * FROM published_versions ORDER BY id DESC LIMIT 1").fetchone()
@@ -162,6 +171,82 @@ def publish_form(request: Request, month1: str = Form(...), month2: str = Form(.
             "error": f"发布过程中发生错误，已回滚且未产生新版本：{exc}",
             "month1": month1, "month2": month2,
         }, status_code=500)
+    finally:
+        close_conn(conn)
+
+
+# ---------------------------------------------------------------- 异常核查
+
+def _render_anomalies(request: Request, conn, status_code: int = 200,
+                      error: str | None = None, ok: str | None = None,
+                      threshold_input: str = ""):
+    overview = build_overview(conn)
+    return templates.TemplateResponse(request, "anomalies.html", {
+        "overview": overview,
+        "error": error,
+        "ok": ok,
+        "threshold_input": threshold_input,
+    }, status_code=status_code)
+
+
+@app.get("/anomalies", response_class=HTMLResponse)
+def anomalies_page(request: Request):
+    conn = get_conn()
+    try:
+        return _render_anomalies(request, conn)
+    finally:
+        close_conn(conn)
+
+
+@app.post("/anomalies/threshold")
+def anomalies_set_threshold(request: Request,
+                            max_kwh_per_hour: str = Form("")):
+    fail = bool(config.ENABLE_FAULT_INJECTION and
+                request.headers.get("X-Fail-Anomaly-Write") == "1")
+    conn = get_conn()
+    try:
+        result = set_threshold(conn, max_kwh_per_hour, fail_before_commit=fail)
+        msg = (f"现行阈值已设为 {result['max_kwh_per_hour']:g} kWh/h。"
+               if result["changed"]
+               else f"阈值仍为 {result['max_kwh_per_hour']:g} kWh/h（未新建版本）。")
+        msg += f" 本次新形成 {result['new_records']} 条待复测记录。"
+        return _render_anomalies(request, conn, ok=msg,
+                                 threshold_input=f"{result['max_kwh_per_hour']:g}")
+    except ThresholdError as exc:
+        return _render_anomalies(request, conn, status_code=400,
+                                 error=str(exc),
+                                 threshold_input=max_kwh_per_hour)
+    except RuntimeError as exc:
+        return _render_anomalies(
+            request, conn, status_code=500,
+            error=f"写入失败，阈值与记录均未改变（已回滚）：{exc}",
+            threshold_input=max_kwh_per_hour)
+    finally:
+        close_conn(conn)
+
+
+@app.post("/anomalies/{record_id}/verify")
+def anomalies_verify(request: Request, record_id: int,
+                     note: str = Form("")):
+    fail = bool(config.ENABLE_FAULT_INJECTION and
+                request.headers.get("X-Fail-Anomaly-Write") == "1")
+    conn = get_conn()
+    try:
+        result = verify_anomaly(conn, record_id, note, fail_before_commit=fail)
+        msg = ("该记录此前已核实，状态未改变。"
+               if result["already_verified"]
+               else f"记录 #{record_id} 已标记为已核实。")
+        return _render_anomalies(request, conn, ok=msg)
+    except LookupError as exc:
+        return _render_anomalies(request, conn, status_code=404, error=str(exc))
+    except StaleAnomalyError as exc:
+        return _render_anomalies(
+            request, conn, status_code=409,
+            error=f"记录 #{record_id} 已过期，未写入核实结论：{exc}")
+    except RuntimeError as exc:
+        return _render_anomalies(
+            request, conn, status_code=500,
+            error=f"写入失败，核实状态未改变（已回滚）：{exc}")
     finally:
         close_conn(conn)
 
